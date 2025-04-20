@@ -25,6 +25,8 @@ node createContext.js
 - Focused context generators 
 - Language-specific optimizers
 
+**[Join Discussions on GitHub](https://github.com/mgks/ai-context-optimization/discussions)**
+
 ---
 
 :rocket: Created by [Ghazi Khan](https://mgks.dev)
