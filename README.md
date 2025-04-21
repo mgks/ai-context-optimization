@@ -19,10 +19,25 @@ cd cursor-max-optimizer
 node createContext.js
 ```
 
+### [Role-Based AI Development Workflow](./role-based-workflow)
+
+A structured approach to AI-assisted development that separates architectural planning from implementation, using different AI models for each role to optimize costs.
+
+**Key Benefits:**
+- Use advanced models only for high-level architecture
+- Delegate implementation to cost-effective models
+- Maintain shared context through simple file-based communication
+- Works with any AI-powered IDE or assistant
+
+```bash
+# Get started by creating:
+touch plan.md context.json interaction_log.md
+```
+
 ## Let's Discuss
 
 - Context pruning techniques
-- Focused context generators 
+- Focused context generators
 - Language-specific optimizers
 
 **[Join Discussions on GitHub](https://github.com/mgks/ai-context-optimization/discussions)**
