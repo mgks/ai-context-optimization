@@ -1,4 +1,4 @@
-# AI Context Optimizer
+# Cursor MAX (AI Context) Optimizer
 
 A toolkit to generate comprehensive project context for AI assistants, potentially save on tool call costs, and enhance your AI coding productivity.
 
