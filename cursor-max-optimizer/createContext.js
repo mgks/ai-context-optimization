@@ -1,453 +1,741 @@
 #!/usr/bin/env node
 
 /**
- * AI Context Optimization : Comrehensive Context Creation Tool
+ * AI Context Optimization : Comprehensive Context Creation Tool
  * ------------------------------
  * A tool for generating comprehensive code context for AI assistants while minimizing token costs.
- * 
+ *
  * This script creates a single markdown file containing your entire codebase structure and content,
  * which can be pasted directly into AI chat interfaces (like Cursor's MAX models) to provide
- * complete project context in one go, eliminating the need for multiple tool calls.
- * 
+ * complete project context in one go, eliminating the need for multiple expensive tool calls.
+ *
  * BENEFITS:
- * - Save money: Reduces cost by up to 95% when using MAX models (avoiding per file read)
+ * - Save money: Reduces cost significantly when using MAX models (avoiding per file read)
  * - Better context: Provides the AI with a complete view of your project at once
- * - Privacy control: Only includes files you want, respecting .gitignore and custom exclusions
+ * - Privacy control: Only includes files you want, respecting custom exclusions
  * - Performance stats: Shows token counts, model compatibility, and cost estimations
- * 
+ *
  * USAGE:
- * 1. Configure the excludePaths and includeExtensions in the config object below
+ * 1. Configure the excludePaths, includePaths, and includeExtensions in the config object below
  * 2. Run: node createContext.js
  * 3. Copy the generated context.md into your AI chat
- * 4. Use a custom mode with just grep and edit tools enabled
- * 
+ * 4. Use a custom mode with just grep and edit tools enabled (see README)
+ *
  * Created by: Ghazi Khan (mgks.dev)
- * Version: 0.1.0
+ * Version: 0.2.1
+ *
+ * CHANGELOG:
+ * - v0.2.0: (2025-04-22)
+ *   - Updated model context window sizes based on latest available information.
+ *   - Re-included Claude 3.7 Sonnet/MAX names as requested.
+ *   - Fixed recursive exclusion using improved `find` command logic.
+ *   - Removed redundant helper functions (`shouldExclude`, `shouldInclude`).
+ *   - Updated model context limits and warning threshold (70%).
+ *   - Enhanced configuration defaults (more exclusions/extensions).
+ *   - Improved statistics reporting and cost comparison.
+ *   - Added debug flag, better error handling, and code quality improvements.
+ *   - Refined language detection and token estimation.
+ *   - Added project name and timestamp to output.
+ * - v0.1.0: Initial release.
  */
 
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 
+// --- CONFIGURATION ---
 // Define the output file name outside the config object so we can reference it
 const outputFileName = 'context.md';
 
-// CONFIGURATION - Edit these variables as needed
 const config = {
   // Output file name
   outputFile: outputFileName,
-  
-  // Directories and files to include (empty array means include everything)
-  includePaths: [],
-  
-  // Directories and files to exclude
+
+  // Directories and files/patterns to include (empty array means include everything not excluded)
+  // Uses `find -path` patterns (e.g., './src/*' or './lib/*.js')
+  includePaths: [], // Example: ['./src', './lib/*.js']
+
+  // Directories, files, or patterns to exclude.
+  // Will exclude recursively if it's a directory name.
+  // NOTE: Uses `find` patterns. Simple names (like 'node_modules') exclude that name anywhere.
+  // Paths with slashes (like 'dist/specific') are matched from the root.
   excludePaths: [
-    'createContext.js',
-    outputFileName,
+    'createContext.js', // This script itself
+    outputFileName,     // The output file
     '.DS_Store',
     'node_modules',
-    '.git',
-    '.gitignore',
+    '.git',             // Exclude .git directory anywhere
+    '.hg',              // Exclude Mercurial directory anywhere
+    '.svn',             // Exclude Subversion directory anywhere
+    '.idea',            // Exclude JetBrains IDE metadata anywhere
+    '.vscode',          // Exclude VSCode metadata anywhere (unless you want settings included)
     '.cursorignore',
     '.cursorindexingignore',
     'dist',
     'build',
-    'vendor'
+    'out',
+    'vendor',
+    '*.log',            // Exclude log files
+    '*.lock',           // Exclude lock files (like package-lock.json, yarn.lock) - adjust if needed
+    '*.swp',            // Exclude vim swap files
+    '*.bak',            // Exclude backup files
+    '*.tmp',            // Exclude temporary files
+    'pycache',          // Exclude python cache
+    '__pycache__',      // Exclude python cache (alternative name)
+    // Add project-specific exclusions here
+    // 'amplify-*',
+    // '*-sdk',
   ],
-  
-  // File extensions to include in content (empty array means include all files)
+
+  // File extensions to include in content (empty array means include all files found)
+  // Files not matching these extensions will be listed in the structure but content omitted.
   includeExtensions: [
-    '.js', '.jsx', '.ts', '.tsx', '.php', '.html', '.css', '.scss', 
-    '.json', '.md', '.txt', '.yml', '.yaml', '.config', '.env'
+    // Programming Languages
+    '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', // JavaScript/TypeScript
+    '.py',                                      // Python
+    '.java',                                    // Java
+    '.cs',                                      // C#
+    '.php',                                     // PHP
+    '.rb',                                      // Ruby
+    '.go',                                      // Go
+    '.rs',                                      // Rust
+    '.swift',                                   // Swift
+    '.kt', '.kts',                              // Kotlin
+    '.dart',                                    // Dart
+    '.scala',                                   // Scala
+    '.lua',                                     // Lua
+    '.pl',                                      // Perl
+    '.c', '.h', '.cpp', '.hpp',                 // C/C++
+
+    // Web Development
+    '.html', '.htm',                            // HTML
+    '.css', '.scss', '.sass', '.less',          // CSS/Preprocessors
+    '.vue',                                     // Vue.js
+    '.svelte',                                  // Svelte
+
+    // Data Formats & Config
+    '.json',                                    // JSON
+    '.xml',                                     // XML
+    '.yml', '.yaml',                            // YAML
+    '.toml',                                    // TOML
+    '.ini',                                     // INI
+    '.env',                                     // Environment files
+    '.config',                                  // Generic Config files
+
+    // Markup & Text
+    '.md', '.markdown',                         // Markdown
+    '.txt',                                     // Text
+    '.rst',                                     // reStructuredText
+
+    // Shell & Scripts
+    '.sh', '.bash', '.zsh',                     // Shell scripts
+    '.ps1',                                     // PowerShell
+    '.bat',                                     // Batch
+
+    // Database
+    '.sql',                                     // SQL
+
+    // Infrastructure & DevOps
+    '.dockerfile', 'Dockerfile',                // Docker
+    '.tf',                                      // Terraform
+    '.hcl',                                     // HCL (Terraform, Packer)
+    '.gradle',                                  // Gradle
+    '.properties',                              // Java Properties
+
+    // Other common types
+    '.gitignore', // Often useful context
+    // Add other extensions relevant to your projects
   ],
-  
-  // Maximum file size to include in content (in KB, to prevent massive files)
-  maxFileSizeKB: 500
+
+  // Maximum file size to include in content (in KB)
+  maxFileSizeKB: 500,
+
+  // Set to true to see the generated `find` command and other debug info
+  debug: false
 };
+// --- END CONFIGURATION ---
 
-// Helper function to check if a path should be excluded
-function shouldExclude(filePath) {
-  return config.excludePaths.some(excludePath => 
-    filePath.includes('/' + excludePath + '/') || filePath === excludePath || filePath.startsWith(excludePath + '/')
-  );
-}
+// --- HELPER FUNCTIONS ---
 
-// Helper function to check if a path should be included based on includePaths
-function shouldInclude(filePath) {
-  // If includePaths is empty, include everything (that isn't excluded)
-  if (config.includePaths.length === 0) return true;
-  
-  return config.includePaths.some(includePath => 
-    filePath.includes('/' + includePath + '/') || filePath === includePath || filePath.startsWith(includePath + '/')
-  );
-}
-
-// Helper function to check if file should have its content included based on extension
+/**
+ * Checks if a file should have its content included based on its extension or name.
+ * @param {string} filePath - The path to the file.
+ * @returns {boolean} True if the content should be included, false otherwise.
+ */
 function shouldIncludeContent(filePath) {
-  const ext = path.extname(filePath).toLowerCase();
-  // If includeExtensions is empty, include all files
-  if (config.includeExtensions.length === 0) return true;
-  return config.includeExtensions.includes(ext);
+  if (config.includeExtensions.length === 0) return true; // Include all if array is empty
+
+  const fileExtension = path.extname(filePath).toLowerCase();
+  const fileName = path.basename(filePath); // Check full name for files like 'Dockerfile'
+
+  return config.includeExtensions.some(extOrName => {
+      if (extOrName.startsWith('.')) {
+          // Match extension (case-insensitive)
+          return fileExtension === extOrName.toLowerCase();
+      } else {
+          // Match exact filename (case-sensitive, adjust if needed for case-insensitivity)
+          return fileName === extOrName;
+      }
+  });
 }
 
-// Helper function to get file size in KB
+/**
+ * Gets the size of a file in kilobytes.
+ * @param {string} filePath - The path to the file.
+ * @returns {number} File size in KB, or 0 if error.
+ */
 function getFileSizeInKB(filePath) {
   try {
     const stats = fs.statSync(filePath);
     return stats.size / 1024;
   } catch (error) {
+    if (config.debug) {
+        console.warn(`Debug: Could not get stats for file ${filePath}: ${error.message}`);
+    }
     return 0;
   }
 }
 
-// Helper function to estimate token count based on text length
-// Most models count about 4 characters per token on average
-function estimateTokenCount(text, fileExt = '') {
-  // Average tokens per character for different languages
+/**
+ * Estimates the token count for a given text, optionally using file extension hints.
+ * Uses a simple character-based heuristic.
+ * @param {string} text - The text content.
+ * @param {string} [fileExtOrName=''] - The file extension (e.g., '.js') or filename (e.g., 'Dockerfile').
+ * @returns {number} Estimated token count.
+ */
+function estimateTokenCount(text, fileExtOrName = '') {
+  // Simple heuristic: average 4 characters per token, slightly adjusted for known types
   const TOKENS_PER_CHAR = {
-    '.js': 0.25,    // JavaScript: ~4 chars per token
-    '.jsx': 0.25,   // JSX: ~4 chars per token
-    '.ts': 0.25,    // TypeScript: ~4 chars per token
-    '.tsx': 0.25,   // TSX: ~4 chars per token
-    '.php': 0.25,   // PHP: ~4 chars per token
-    '.html': 0.25,  // HTML: ~4 chars per token
-    '.css': 0.22,   // CSS: ~4.5 chars per token
-    '.scss': 0.22,  // SCSS: ~4.5 chars per token
-    '.json': 0.3,   // JSON: ~3.3 chars per token (lots of quotes and symbols)
-    '.md': 0.18,    // Markdown: ~5.5 chars per token (lots of natural language)
-    '.txt': 0.18,   // Text: ~5.5 chars per token (natural language)
-    '.yml': 0.25,   // YAML: ~4 chars per token
-    '.yaml': 0.25,  // YAML: ~4 chars per token
-    'default': 0.25 // Default: ~4 chars per token
+    // Code tends to be around 4 chars/token
+    '.js': 0.25, '.jsx': 0.25, '.ts': 0.25, '.tsx': 0.25, '.mjs': 0.25, '.cjs': 0.25,
+    '.py': 0.25, '.java': 0.25, '.cs': 0.25, '.php': 0.25, '.rb': 0.25, '.go': 0.25, '.rs': 0.25, '.swift': 0.25, '.kt': 0.25, '.kts': 0.25, '.dart': 0.25,
+    '.scala': 0.25, '.lua': 0.25, '.pl': 0.25, '.c': 0.25, '.h': 0.25, '.cpp': 0.25, '.hpp': 0.25,
+    '.vue': 0.25, '.svelte': 0.25,
+    '.sh': 0.25, '.bash': 0.25, '.zsh': 0.25, '.ps1': 0.25, '.bat': 0.25,
+    '.tf': 0.25, '.hcl': 0.25, '.gradle': 0.25, '.properties': 0.25,
+
+    // Markup/Data often slightly denser or similar
+    '.html': 0.24, '.htm': 0.24, '.xml': 0.24,
+    '.css': 0.22, '.scss': 0.22, '.sass': 0.22, '.less': 0.22, // CSS slightly denser tokens
+    '.sql': 0.26, // SQL keywords can be token-heavy
+
+    // Config/Data formats - JSON is token heavy due to symbols/quotes
+    '.json': 0.3,
+    '.yml': 0.25, '.yaml': 0.25, '.toml': 0.25, '.ini': 0.25,
+    '.env': 0.25, '.config': 0.25,
+    '.dockerfile': 0.25, 'Dockerfile': 0.25,
+    '.gitignore': 0.25,
+
+    // Natural language / Prose is less dense (more chars/token)
+    '.md': 0.18, '.markdown': 0.18, '.txt': 0.18, '.rst': 0.18,
+
+    'default': 0.25 // Default average if type unknown
   };
-  
-  // Get token multiplier based on file extension (if available)
+
   let tokensPerChar = TOKENS_PER_CHAR.default;
-  if (fileExt && TOKENS_PER_CHAR[fileExt]) {
-    tokensPerChar = TOKENS_PER_CHAR[fileExt];
+  const lowerExt = fileExtOrName.startsWith('.') ? fileExtOrName.toLowerCase() : path.extname(fileExtOrName).toLowerCase();
+  const baseName = path.basename(fileExtOrName);
+
+  if (lowerExt && TOKENS_PER_CHAR[lowerExt]) {
+    tokensPerChar = TOKENS_PER_CHAR[lowerExt];
+  } else if (TOKENS_PER_CHAR[baseName]) { // Check for exact filename match (like Dockerfile)
+    tokensPerChar = TOKENS_PER_CHAR[baseName];
   }
-  
-  // Return estimated token count
+
   return Math.ceil(text.length * tokensPerChar);
 }
 
-// Helper function to determine language from file extension for markdown code blocks
+/**
+ * Gets the markdown language identifier from a file path extension or filename.
+ * @param {string} filePath - The path to the file.
+ * @returns {string} Markdown language identifier (e.g., 'javascript').
+ */
 function getLanguageFromExt(filePath) {
   const ext = path.extname(filePath).toLowerCase();
+  const filename = path.basename(filePath); // For files like Dockerfile
+
   const langMap = {
-    '.js': 'javascript',
-    '.jsx': 'jsx',
-    '.ts': 'typescript',
-    '.tsx': 'tsx',
-    '.php': 'php',
-    '.html': 'html',
-    '.css': 'css',
-    '.scss': 'scss',
-    '.json': 'json',
-    '.md': 'markdown',
-    '.txt': 'text',
-    '.yml': 'yaml',
-    '.yaml': 'yaml',
-    '.sh': 'bash',
-    '.bash': 'bash',
+    '.js': 'javascript', '.jsx': 'jsx', '.ts': 'typescript', '.tsx': 'tsx', '.mjs': 'javascript', '.cjs': 'javascript',
     '.py': 'python',
     '.java': 'java',
-    '.c': 'c',
-    '.cpp': 'cpp',
     '.cs': 'csharp',
+    '.php': 'php',
+    '.html': 'html', '.htm': 'html',
+    '.css': 'css', '.scss': 'scss', '.sass': 'sass', '.less': 'less',
+    '.vue': 'vue',
+    '.svelte': 'svelte',
+    '.json': 'json',
+    '.md': 'markdown', '.markdown': 'markdown',
+    '.txt': 'text', '.rst': 'rst',
+    '.yml': 'yaml', '.yaml': 'yaml', '.toml': 'toml', '.ini': 'ini',
+    '.xml': 'xml',
+    '.sh': 'bash', '.bash': 'bash', '.zsh': 'zsh', '.ps1': 'powershell', '.bat': 'batch',
+    '.sql': 'sql',
     '.rb': 'ruby',
     '.go': 'go',
     '.rs': 'rust',
     '.swift': 'swift',
-    '.kt': 'kotlin',
+    '.kt': 'kotlin', '.kts': 'kotlin',
     '.dart': 'dart',
-    '.sql': 'sql'
+    '.scala': 'scala',
+    '.lua': 'lua',
+    '.pl': 'perl',
+    '.c': 'c', '.h': 'c', '.cpp': 'cpp', '.hpp': 'cpp',
+    '.env': 'dotenv',
+    '.config': 'plaintext', // Or specify if a known config type
+    '.dockerfile': 'dockerfile', 'Dockerfile': 'dockerfile',
+    '.tf': 'terraform', '.hcl': 'hcl',
+    '.gradle': 'gradle',
+    '.properties': 'properties',
+    '.gitignore': 'gitignore',
+    // Add more mappings as needed
   };
-  
-  return langMap[ext] || 'plaintext';
+
+  // Prioritize filename match, then extension match, then default
+  return langMap[filename] || langMap[ext] || 'plaintext';
 }
 
-// Generate the directory tree using find command for more reliable results
-function generateDirectoryTree() {
+/**
+ * Generates the list of files using the `find` command, applying include/exclude rules.
+ * @returns {string[]} An array of file paths relative to the current directory.
+ */
+function generateFileList() {
   try {
-    // Create the find command with exclusions
-    const excludeArgs = config.excludePaths.map(dir => `-not -path "./${dir}/*" -not -path "./${dir}"`).join(' ');
-    const includeArgs = config.includePaths.length > 0 
-      ? config.includePaths.map(dir => `-path "./${dir}*"`).join(' -o ') 
-      : '';
-    
-    const findCommand = includeArgs
-      ? `find . -type f ${excludeArgs} \\( ${includeArgs} \\) | sort`
-      : `find . -type f ${excludeArgs} | sort`;
-    
+    // Base command: find files, excluding ./ by default to avoid self-reference issues if script is in root
+    let findCommand = `find . -path . -prune -o -type f`; // Exclude '.' itself, then find files
+
+    // --- Build Exclusion Rules ---
+    const excludePatterns = config.excludePaths.map(p => {
+        const escapedPath = p.replace(/([*?"'\[\]{}() ])/g, '\\$1'); // More robust escaping
+
+        if (escapedPath.includes('/')) {
+            // Path relative to '.' (e.g., dist/specific, ./build)
+            const cleanedPath = escapedPath.startsWith('./') ? escapedPath : `./${escapedPath}`;
+            return `-path "${cleanedPath}" -o -path "${cleanedPath}/*"`;
+        } else if (escapedPath.includes('*') || escapedPath.includes('?')) {
+             // Wildcard name (e.g., *.log)
+             return `-name "${escapedPath}"`;
+        } else {
+            // Simple name (e.g., node_modules, .git) - exclude file/dir with this name anywhere
+            return `-name "${escapedPath}" -o -path "*/${escapedPath}/*"`;
+        }
+    }).filter(Boolean);
+
+    if (excludePatterns.length > 0) {
+      // Group exclusions and negate: -not \( pattern1 -o pattern2 ... \)
+      findCommand += ` -not \\( ${excludePatterns.join(' -o ')} \\)`;
+    }
+
+    // --- Build Inclusion Rules ---
+    // If includePaths is specified, *only* files matching these patterns are kept (after exclusions).
+    const includePatterns = config.includePaths.map(p => {
+        const escapedPath = p.replace(/([*?"'\[\]{}() ])/g, '\\$1');
+        const cleanedPath = escapedPath.startsWith('./') ? escapedPath : `./${escapedPath}`;
+        // Use -path for explicit paths/patterns relative to '.'
+        return `-path "${cleanedPath}"`;
+    }).filter(Boolean);
+
+    if (includePatterns.length > 0) {
+      // Group inclusions: \( pattern1 -o pattern2 ... \)
+      findCommand += ` \\( ${includePatterns.join(' -o ')} \\)`;
+    }
+
+    // Add sorting and print command
+    findCommand += ` -print | sort`;
+
+    if (config.debug) {
+        console.log("DEBUG: Running find command:");
+        console.log(findCommand);
+    }
+
     // Execute the command
-    const output = execSync(findCommand, { encoding: 'utf8' });
+    const output = execSync(findCommand, { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 }); // Increased buffer
     return output.split('\n').filter(line => line.trim() !== '');
+
   } catch (error) {
-    console.error('Error generating directory tree:', error);
-    return [];
+    console.error(`\n❌ Error generating file list with find command.`);
+    // Attempt to provide more specific feedback based on error type
+    if (error.stderr && error.stderr.includes('usage: find')) {
+         console.error('Stderr suggests a syntax error in the generated find command.');
+         console.error('Check your includePaths and excludePaths for invalid characters or patterns.');
+    } else if (error.code === 'ENOBUFS' || (error.signal === 'SIGTERM' && error.message.includes('maxBuffer'))) {
+        console.error('Error suggests the file list is too large for the command buffer.');
+        console.error('Consider increasing maxBuffer further or refining excludePaths.');
+    } else {
+        console.error('An unexpected error occurred executing `find`.');
+        if (error.stderr) console.error('Stderr:', error.stderr);
+    }
+    console.error(`Command attempted: ${error.cmd || findCommand}`); // Show command if available
+    console.error('Error object:', error.message);
+    console.error('\nPossible causes:');
+    console.error(' - `find` command not available or not working as expected (e.g., Windows without WSL/Git Bash/Cygwin).');
+    console.error(' - Incorrect syntax or unsupported patterns in includePaths/excludePaths.');
+    console.error(' - Very large number of files or excessively long paths.');
+    console.error('\nExiting due to error.');
+    process.exit(1); // Exit the script
   }
 }
 
-// Generate a visual tree structure from file paths
+/**
+ * Generates a visual directory tree structure from a flat list of file paths.
+ * @param {string[]} files - Array of file paths (e.g., './src/main.js').
+ * @returns {string} A string representing the visual tree.
+ */
 function generateTreeStructure(files) {
-  // First, clean up the file paths (remove ./ prefix)
-  const cleanPaths = files.map(file => file.startsWith('./') ? file.substring(2) : file);
-  
-  // Create a tree object
-  const tree = {};
-  
-  // Build the tree structure
-  for (const file of cleanPaths) {
-    const parts = file.split('/');
-    let current = tree;
-    
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
-      const isFile = i === parts.length - 1;
-      
-      if (isFile) {
-        if (!current.files) current.files = [];
-        current.files.push(part);
-      } else {
-        if (!current.dirs) current.dirs = {};
-        if (!current.dirs[part]) current.dirs[part] = {};
-        current = current.dirs[part];
-      }
+    const cleanPaths = files.map(file => file.startsWith('./') ? file.substring(2) : file)
+                            .filter(Boolean); // Remove empty strings if any
+
+    const tree = {};
+
+    // Build the tree object
+    for (const filePath of cleanPaths) {
+        const parts = filePath.split('/');
+        let currentLevel = tree;
+
+        for (let i = 0; i < parts.length; i++) {
+            const part = parts[i];
+            const isLastPart = i === parts.length - 1;
+
+            if (isLastPart) {
+                // It's a file - store in a special key (e.g., _files) to avoid name clashes
+                if (!currentLevel._files) currentLevel._files = [];
+                currentLevel._files.push(part);
+            } else {
+                // It's a directory
+                if (!currentLevel[part]) currentLevel[part] = {}; // Create dir object if it doesn't exist
+                currentLevel = currentLevel[part]; // Move deeper into the tree
+            }
+        }
     }
-  }
-  
-  // Function to print the tree structure
-  function printTree(node, prefix = '', isLast = true, path = '') {
-    let result = '';
-    
-    // Print directories
-    if (node.dirs) {
-      const dirs = Object.keys(node.dirs);
-      dirs.forEach((dir, index) => {
-        const isLastDir = index === dirs.length - 1 && (!node.files || node.files.length === 0);
-        const newPath = path ? `${path}/${dir}` : dir;
-        
-        result += `${prefix}${isLast && isLastDir ? '└── ' : '├── '}📁 ${dir}/\n`;
-        result += printTree(node.dirs[dir], 
-                          `${prefix}${isLast && isLastDir ? '    ' : '│   '}`, 
-                          isLastDir, 
-                          newPath);
-      });
+
+    // Recursive function to build the string representation
+    function buildTreeString(node, prefix = '', isLastChild = true) {
+        let result = '';
+        // Get directory keys, excluding the special _files key
+        const dirKeys = Object.keys(node).filter(key => key !== '_files').sort();
+        const files = (node._files || []).sort(); // Get and sort files
+
+        const totalItems = dirKeys.length + files.length;
+        let currentItemIndex = 0;
+
+        // Process directories first
+        dirKeys.forEach(key => {
+            currentItemIndex++;
+            const isLast = currentItemIndex === totalItems;
+            const connector = isLast ? '└── ' : '├── ';
+            const indent = prefix + (isLastChild ? '    ' : '│   '); // Indent for children
+            result += `${prefix}${connector}📁 ${key}/\n`;
+            result += buildTreeString(node[key], indent, isLast); // Recurse
+        });
+
+        // Process files
+        files.forEach(file => {
+            currentItemIndex++;
+            const isLast = currentItemIndex === totalItems;
+            const connector = isLast ? '└── ' : '├── ';
+             // Basic file icon, could be enhanced based on type
+            const icon = '📄';
+            result += `${prefix}${connector}${icon} ${file}\n`;
+        });
+
+        return result;
     }
-    
-    // Print files
-    if (node.files) {
-      node.files.sort(); // Sort files alphabetically
-      node.files.forEach((file, index) => {
-        const isLastFile = index === node.files.length - 1;
-        result += `${prefix}${isLastFile ? '└── ' : '├── '}${file}\n`;
-      });
-    }
-    
-    return result;
-  }
-  
-  // Generate and return the tree structure
-  return printTree(tree);
+
+    return buildTreeString(tree); // Start building from the root
 }
 
-// Clean file path (remove ./ prefix)
+
+/**
+ * Cleans a file path by removing the leading './'.
+ * @param {string} filePath - The file path.
+ * @returns {string} The cleaned file path.
+ */
 function cleanPath(filePath) {
   return filePath.startsWith('./') ? filePath.substring(2) : filePath;
 }
 
-// Format a file size for display
+/**
+ * Formats a file size (in KB) into a human-readable string (KB or MB).
+ * @param {number} sizeInKB - Size in kilobytes.
+ * @returns {string} Formatted size string.
+ */
 function formatFileSize(sizeInKB) {
-  if (sizeInKB < 1024) {
+  if (sizeInKB < 1) {
+      return `${(sizeInKB * 1024).toFixed(0)} B`; // Show bytes for very small files
+  } else if (sizeInKB < 1024) {
     return `${sizeInKB.toFixed(2)} KB`;
   } else {
     return `${(sizeInKB / 1024).toFixed(2)} MB`;
   }
 }
 
-// Format number with commas for readability
+/**
+ * Formats a number with commas for better readability.
+ * @param {number} num - The number to format.
+ * @returns {string} Formatted number string.
+ */
 function formatNumber(num) {
+  // Handle potential non-numeric input gracefully
+  if (typeof num !== 'number' || isNaN(num)) {
+      return String(num);
+  }
   return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
-// Generate the context.md file
+// --- MAIN EXECUTION ---
+
+/**
+ * Main function to generate the context file and statistics.
+ */
 function generateContextFile() {
-  const allFiles = generateDirectoryTree();
+  console.log("🔍 Finding relevant files...");
+  const allFiles = generateFileList();
+
+  if (allFiles.length === 0) {
+      console.log("\n⚠️ No files found matching the criteria. Check your include/exclude paths and patterns.");
+      console.log(`   - Include Paths: ${config.includePaths.join(', ') || '(all not excluded)'}`);
+      console.log(`   - Exclude Paths: ${config.excludePaths.join(', ')}`);
+      console.log(`   - Include Extensions: ${config.includeExtensions.join(', ') || '(all found files)'}`);
+      if (config.debug) console.log("   (Debug mode is ON)");
+      return; // Stop execution
+  }
+
+  console.log(`   Found ${allFiles.length} files. Processing...`);
+
   const stats = {
-    totalFiles: allFiles.length,
-    includedFiles: 0,
-    skippedFiles: 0,
+    totalFilesFound: allFiles.length,
+    includedFileContents: 0, // Files whose content was actually included
+    skippedFileContents: 0,  // Files whose content was skipped (size, type)
     skippedDueToSize: 0,
     skippedDueToType: 0,
-    totalTokens: 0,
-    totalCharacters: 0,
-    totalSizeKB: 0,
-    filesByType: {},
-    tokensPerFileType: {}
+    totalTokens: 0,          // Estimated total tokens for included content + structure
+    totalCharacters: 0,      // Total characters in included file content
+    totalOriginalSizeKB: 0,  // Sum of sizes of all *found* files
+    filesByType: {},         // Count of all *found* files per extension/type
+    tokensPerFileType: {},   // Estimated tokens per extension/type for *included* content
+    includedContentSizeKB: 0 // Sum of sizes of files whose content was included
   };
-  
-  // Start building the content
-  let content = `# Project Context\n\n`;
-  
-  // Add directory tree section with visual structure
-  content += `## Directory Structure\n\n\`\`\`\n`;
-  content += generateTreeStructure(allFiles);
-  content += `\`\`\`\n\n`;
-  
-  // Add file contents section
-  content += `## File Contents\n\n`;
-  
-  // Process all files
+
+  // --- Build Content ---
+  const projectName = path.basename(process.cwd());
+  let outputContent = `# Project Context: ${projectName}\n\n`;
+  outputContent += `Generated: ${new Date().toISOString()}\n\n`;
+  outputContent += `## Configuration Summary\n`;
+  outputContent += `- Included Extensions: ${config.includeExtensions.length > 0 ? config.includeExtensions.join(', ') : 'All'}\n`;
+  outputContent += `- Max File Size: ${config.maxFileSizeKB} KB\n`;
+  // Optionally list excludes/includes if needed, but can be verbose
+  // outputContent += `- Exclusions: ${config.excludePaths.join(', ')}\n`;
+  outputContent += `\n`;
+
+
+  // Add Directory Tree Section
+  console.log("🌳 Generating directory structure...");
+  outputContent += `## Directory Structure\n\n\`\`\`\n`;
+  outputContent += generateTreeStructure(allFiles);
+  outputContent += `\`\`\`\n\n`;
+
+  // Add File Contents Section
+  console.log("📄 Processing file contents...");
+  outputContent += `## File Contents\n\n`;
+
   for (const filePath of allFiles) {
     const cleanFilePath = cleanPath(filePath);
-    const fileExt = path.extname(filePath).toLowerCase();
-    
-    // Track file types
-    if (!stats.filesByType[fileExt]) {
-      stats.filesByType[fileExt] = 0;
-      stats.tokensPerFileType[fileExt] = 0;
-    }
-    stats.filesByType[fileExt]++;
-    
-    // Skip files that should be excluded from content
-    if (!shouldIncludeContent(filePath)) {
-      stats.skippedFiles++;
-      stats.skippedDueToType++;
-      content += `### ${cleanFilePath}\n\n*File content skipped due to file type configuration*\n\n`;
-      continue;
-    }
-    
-    // Skip files that are too large
+    const fileExtOrName = path.extname(filePath).toLowerCase() || path.basename(filePath); // Use basename if no ext
     const fileSizeKB = getFileSizeInKB(filePath);
-    stats.totalSizeKB += fileSizeKB;
-    
-    if (fileSizeKB > config.maxFileSizeKB) {
-      stats.skippedFiles++;
-      stats.skippedDueToSize++;
-      content += `### ${cleanFilePath}\n\n*File content skipped (${fileSizeKB.toFixed(2)} KB exceeds ${config.maxFileSizeKB} KB limit)*\n\n`;
-      continue;
+
+    // Update stats for *every* file found
+    stats.totalOriginalSizeKB += fileSizeKB;
+    if (!stats.filesByType[fileExtOrName]) {
+      stats.filesByType[fileExtOrName] = 0;
+      stats.tokensPerFileType[fileExtOrName] = 0; // Initialize token count
     }
-    
+    stats.filesByType[fileExtOrName]++;
+
+    // --- Check if content should be included ---
+    let skipReason = null;
+    if (!shouldIncludeContent(filePath)) {
+      skipReason = "Excluded by extension/type configuration";
+      stats.skippedFileContents++;
+      stats.skippedDueToType++;
+    } else if (fileSizeKB > config.maxFileSizeKB) {
+      skipReason = `File size ${formatFileSize(fileSizeKB)} exceeds ${config.maxFileSizeKB} KB limit`;
+      stats.skippedFileContents++;
+      stats.skippedDueToSize++;
+    }
+
+    // --- Add file section header ---
+    // Use cleaned path for header
+    outputContent += `### \`${cleanFilePath}\`\n\n`; // Use backticks for better rendering of paths
+
+    if (skipReason) {
+      outputContent += `*File content skipped: ${skipReason}*\n\n`;
+      continue; // Move to the next file
+    }
+
+    // --- Read and add file content ---
     try {
-      // Read the file content
+      // Use original filePath for reading
       const fileContent = fs.readFileSync(filePath, 'utf8');
       const language = getLanguageFromExt(filePath);
-      
-      // Update statistics
-      stats.includedFiles++;
-      const fileTokens = estimateTokenCount(fileContent, fileExt);
+
+      // Update stats for included content
+      stats.includedFileContents++;
+      stats.includedContentSizeKB += fileSizeKB;
+      const fileTokens = estimateTokenCount(fileContent, fileExtOrName);
       stats.totalTokens += fileTokens;
       stats.totalCharacters += fileContent.length;
-      stats.tokensPerFileType[fileExt] += fileTokens;
-      
-      // Add file section with start/end markers
-      content += `### ${cleanFilePath}\n\n`;
-      content += `----- ${cleanFilePath} file starts -----\n\n`;
-      content += `\`\`\`${language}\n${fileContent}\n\`\`\`\n\n`;
-      content += `----- ${cleanFilePath} file ends -----\n\n`;
+      stats.tokensPerFileType[fileExtOrName] += fileTokens; // Add tokens to the correct type
+
+      // Add content to output
+      // Use simplified markers with cleaned path
+      outputContent += `\`\`\`${language}\n`; // Start code block immediately
+      outputContent += fileContent.trim() ? fileContent : `[EMPTY FILE]`; // Handle empty files
+      outputContent += `\n\`\`\`\n\n`; // End code block and add spacing
+
     } catch (error) {
-      stats.skippedFiles++;
-      content += `### ${cleanFilePath}\n\n*Error reading file: ${error.message}*\n\n`;
+      stats.skippedFileContents++; // Count as skipped if read error
+      outputContent += `*Error reading file: ${error.message}*\n\n`;
+      console.warn(`Warning: Could not read file ${filePath}: ${error.message}`);
     }
   }
-  
-  // Calculate tokens for the structure and headers
-  const structureTokens = estimateTokenCount(content, '.md');
-  stats.totalTokens += structureTokens;
-  
-  // Write the content to the output file
-  fs.writeFileSync(config.outputFile, content);
-  
-  // Calculate final stats
+
+  // Estimate tokens for the non-content parts (headers, structure, etc.)
+  // This is a rough estimate; treat the structure itself as markdown.
+  const structureOnlyContent = outputContent.replace(/```[\s\S]*?```/g, ''); // Remove code blocks temporarily
+  const structureTokens = estimateTokenCount(structureOnlyContent, '.md');
+  stats.totalTokens += structureTokens; // Add overhead estimate
+
+  // --- Finalize and Write Output ---
+  console.log(`💾 Writing output to ${config.outputFile}...`);
+  try {
+      fs.writeFileSync(config.outputFile, outputContent);
+  } catch (error) {
+      console.error(`\n❌ Error writing output file ${config.outputFile}: ${error.message}`);
+      process.exit(1);
+  }
+
+
+  // --- Calculate and Print Statistics ---
+  console.log("📊 Calculating statistics...");
   const outputFileSizeKB = getFileSizeInKB(config.outputFile);
-  
-  // Get top 5 file types by token count
-  const topFileTypes = Object.entries(stats.tokensPerFileType)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5);
-  
-  // Output detailed statistics
+
+  // --- DETAILED CONSOLE OUTPUT ---
   console.log("\n" + "=".repeat(60));
-  console.log(`📊 CONTEXT FILE STATISTICS`);
+  console.log(`📊 CONTEXT FILE GENERATION REPORT`);
   console.log("=".repeat(60));
-  console.log(`📝 Content Summary:`);
-  console.log(`  • Context file created: ${config.outputFile}`);
-  console.log(`  • File size: ${formatFileSize(outputFileSizeKB)}`);
-  console.log(`  • Estimated tokens: ${formatNumber(stats.totalTokens)}`);
-  console.log(`  • Characters: ${formatNumber(stats.totalCharacters)}`);
-  console.log(`  • Markdown overhead: ~${formatNumber(structureTokens)} tokens`);
-  
-  console.log(`\n📁 File Processing:`);
-  console.log(`  • Total files found: ${stats.totalFiles}`);
-  console.log(`  • Files included: ${stats.includedFiles}`);
-  console.log(`  • Files skipped: ${stats.skippedFiles}`);
+  console.log(`Project: ${projectName}`);
+  console.log(`Output File: ${config.outputFile}`);
+  console.log(`Timestamp: ${new Date().toLocaleString()}`);
+  console.log("-".repeat(60));
+
+  console.log(`📝 Output File Summary:`);
+  console.log(`  • Final Size: ${formatFileSize(outputFileSizeKB)}`);
+  console.log(`  • Estimated Tokens: ~${formatNumber(stats.totalTokens)}`);
+  console.log(`  • Included Characters: ${formatNumber(stats.totalCharacters)}`);
+  console.log(`  • Structure/Overhead Tokens: ~${formatNumber(structureTokens)}`);
+
+  console.log(`\n📁 File Processing Summary:`);
+  console.log(`  • Total files scanned: ${stats.totalFilesFound}`);
+  console.log(`  • File content included: ${stats.includedFileContents}`);
+  console.log(`  • File content skipped: ${stats.skippedFileContents}`);
   if (stats.skippedDueToSize > 0) {
-    console.log(`    - Skipped (size): ${stats.skippedDueToSize}`);
+    console.log(`    - Skipped (size limit): ${stats.skippedDueToSize}`);
   }
   if (stats.skippedDueToType > 0) {
-    console.log(`    - Skipped (type): ${stats.skippedDueToType}`);
+    console.log(`    - Skipped (type/extension): ${stats.skippedDueToType}`);
   }
-  console.log(`  • Total original size: ${formatFileSize(stats.totalSizeKB)}`);
-  
-  console.log(`\n📊 File Types Distribution:`);
-  
-  // Show file types sorted by count
-  const sortedFileTypes = Object.entries(stats.filesByType)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 8); // Show top 8 file types
-  
-  sortedFileTypes.forEach(([ext, count]) => {
-    const tokens = stats.tokensPerFileType[ext] || 0;
-    console.log(`  • ${ext || '(no extension)'}: ${count} files, ~${formatNumber(tokens)} tokens`);
-  });
-  
-  console.log(`\n📈 Token Usage by AI Model:`);
-  // Show token percentage for different AI model context limits
+  console.log(`  • Total size of scanned files: ${formatFileSize(stats.totalOriginalSizeKB)}`);
+  console.log(`  • Total size of included content: ${formatFileSize(stats.includedContentSizeKB)}`);
+
+
+  console.log(`\n📊 Top 5 File Types by Included Content Tokens:`);
+  const topFileTypesByTokens = Object.entries(stats.tokensPerFileType)
+    .filter(([, tokens]) => tokens > 0) // Only show types with included content
+    .sort((a, b) => b[1] - a[1]) // Sort descending by tokens
+    .slice(0, 5);
+
+  if (topFileTypesByTokens.length > 0) {
+      topFileTypesByTokens.forEach(([extOrName, tokens]) => {
+        // Find the count of *included* files of this type (approximation)
+        // More accurate tracking would require storing included counts per type
+        const totalFoundCount = stats.filesByType[extOrName] || 0;
+        // Estimate included count - assumes most files of this type were included if tokens > 0
+        // A more precise count isn't easily available without more complex tracking
+        console.log(`  • ${extOrName || '(no ext/other)'}: ~${formatNumber(tokens)} tokens (${totalFoundCount} files found)`);
+      });
+      if (Object.keys(stats.tokensPerFileType).length > 5) {
+          console.log("  • ... (other file types)");
+      }
+  } else {
+      console.log("  • No file content was included based on current settings.");
+  }
+
+
+  console.log(`\n📈 Estimated Model Context Usage:`);
+  // NOTE: Context limits are based on publicly advertised maximums as of April 2025.
+  // These can change and may vary slightly in specific API implementations or pricing tiers.
   const models = [
-    { name: "Claude Instant", limit: 100000 },
-    { name: "Claude 3.5 Sonnet", limit: 120000 },
-    { name: "Claude 3.7 Sonnet", limit: 120000 },
-    { name: "Claude 3.7 MAX", limit: 200000 },
-    { name: "Gemini 2.5 Pro", limit: 120000 },
-    { name: "Gemini 2.5 Pro MAX", limit: 1000000 },
-    { name: "GPT-4o", limit: 128000 }
+    // Anthropic - Using user's original naming convention + latest known limits
+    { name: "Claude 3.5 Sonnet", limit: 200000 },
+    { name: "Claude 3.7 Sonnet", limit: 200000 }, // Using 200k based on search results
+    { name: "Claude 3.7 MAX", limit: 200000 },    // Using 200k based on search results & original script context
+
+    // OpenAI
+    { name: "GPT-4o", limit: 128000 },
+    { name: "GPT-4 Turbo", limit: 128000 },
+
+    // Google
+    { name: "Gemini 1.5 Pro", limit: 1000000 }, // Standard 1M, 2M available via API
+    { name: "Gemini 1.5 Flash", limit: 1000000 },
   ];
-  
+
   models.forEach(model => {
-    const percentUsed = (stats.totalTokens / model.limit) * 100;
-    const statusSymbol = percentUsed > 95 ? "❌" : percentUsed > 80 ? "⚠️" : "✅";
-    console.log(`  ${statusSymbol} ${model.name}: ${percentUsed.toFixed(1)}% of ${formatNumber(model.limit)} token limit`);
+    const percentUsed = Math.min(100, (stats.totalTokens / model.limit) * 100); // Cap at 100%
+    // Determine status: ❌ Over limit, ⚠️ Over 70%, ✅ OK
+    const statusSymbol = stats.totalTokens > model.limit ? "❌" : percentUsed > 70 ? "⚠️" : "✅";
+    console.log(`  ${statusSymbol} ${model.name}: ${percentUsed.toFixed(1)}% used (~${formatNumber(stats.totalTokens)} / ${formatNumber(model.limit)} tokens)`);
   });
-  
-  console.log("\n💰 Cost Comparison:");
-  // Calculate approximate cost for different models
+
+  console.log("\n💰 Estimated Cost Comparison (Input Tokens / Tool Calls):");
+  // Rough cost estimation based on input tokens (check current pricing)
+  // Note: Output tokens also cost. MAX models often have flat fees or per-call charges.
+  // Using placeholder costs based on original script/common examples - VERIFY CURRENT PRICING
   const costs = [
-    { name: "Claude 3.7 Sonnet", cost: stats.totalTokens / 1000 * 0.0153 },
-    { name: "Claude 3.7 MAX", cost: 0.05 + 0.05 * stats.includedFiles }, // 0.05 per prompt + 0.05 per tool call
-    { name: "Gemini 2.5 Pro", cost: stats.totalTokens / 1000 * 0.014 },
-    { name: "Gemini 2.5 Pro MAX", cost: 0.05 + 0.05 * stats.includedFiles },
-    { name: "GPT-4o", cost: stats.totalTokens / 1000 * 0.015 }
+    // Per-token models (Input cost per 1M tokens - EXAMPLE PRICING ~Apr 2025)
+    { name: "Claude 3.5/3.7 Sonnet ($3/M)", cost: (stats.totalTokens / 1000000) * 3 },
+    { name: "GPT-4o ($5/M)", cost: (stats.totalTokens / 1000000) * 5 },
+    { name: "Gemini 1.5 Pro ($3.5/M or $7/M)", cost: (stats.totalTokens / 1000000) * 3.5 }, // Example pricing
+
+    // MAX / Tool-using models (Approximate cost using this script vs. individual file reads)
+    // Using $0.05 per call as a placeholder based on original script comment - VERIFY CURRENT PRICING
+    { name: "Cursor MAX (This Script)", cost: 0.05 }, // Placeholder: Assumed single prompt fee
+    { name: "Cursor MAX (File Reads)", cost: Math.max(0.05, 0.05 * stats.includedFileContents) }, // Placeholder: $0.05 per file read tool call
   ];
-  
+
   costs.forEach(model => {
-    console.log(`  • ${model.name}: $${model.cost.toFixed(4)}`);
+    console.log(`  • ${model.name}: ~$${model.cost.toFixed(4)}`);
   });
-  
-  // Show potential savings
-  const regularCost = 0.05 * stats.includedFiles; // 0.05 per file read
-  const savingsAmount = regularCost - 0.05; // Single prompt vs multiple file reads
-  const savingsPercent = (savingsAmount / regularCost) * 100;
-  
-  console.log(`\n💸 Tool Call Savings:`);
-  console.log(`  • Without this script: $${regularCost.toFixed(2)} (${stats.includedFiles} file reads @ $0.05)`);
-  console.log(`  • With this script: $0.05 (single prompt)`);
-  console.log(`  • Savings: $${savingsAmount.toFixed(2)} (${savingsPercent.toFixed(0)}%)`);
-  
+
+  // Show potential savings vs tool calls (using placeholder cost)
+  const toolCallCost = Math.max(0.05, 0.05 * stats.includedFileContents);
+  const scriptCost = 0.05; // Placeholder single prompt cost
+  if (toolCallCost > scriptCost && stats.includedFileContents > 1) {
+      const savingsAmount = toolCallCost - scriptCost;
+      // Prevent division by zero if toolCallCost is 0 (though unlikely with Math.max)
+      const savingsPercent = toolCallCost > 0 ? (savingsAmount / toolCallCost) * 100 : 0;
+      console.log(`\n💸 Potential Tool Call Savings (Example: Cursor MAX @ $0.05/call):`);
+      console.log(`  • Est. Cost w/ File Reads: ~$${toolCallCost.toFixed(2)} (${stats.includedFileContents} included files)`);
+      console.log(`  • Est. Cost w/ This Script: ~$${scriptCost.toFixed(2)} (1 prompt)`);
+      console.log(`  • Potential Savings: ~$${savingsAmount.toFixed(2)} (${savingsPercent.toFixed(0)}%)`);
+      console.log(`  (Note: Verify actual tool call costs for your specific AI provider)`);
+  }
+
+
   console.log("=".repeat(60));
-  console.log(`✨ Done! Copy the contents of ${config.outputFile} into your Cursor chat.`);
+  console.log(`✨ Done! Copy the contents of ${config.outputFile} into your AI chat.`);
+  console.log("   Remember to use the custom instructions from the README.md for best results.");
   console.log("=".repeat(60) + "\n");
 }
 
-// Execute the main function
+// --- Run the generator ---
 generateContextFile();
