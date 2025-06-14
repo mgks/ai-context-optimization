@@ -21,9 +21,15 @@
  * 3. Copy the generated context.md into your AI chat
  *
  * Created by: Ghazi Khan (mgks.dev)
- * Version: 0.2.3
+ * Version: 0.2.9
  *
  * CHANGELOG:
+ * - v0.2.9: (2025-06-15)
+ *   - MAJOR FIX: Completely overhauled the `find` command generation logic in `generateDirectoryTreeAsync`.
+ *   - The new logic chains individual `-not` conditions for each exclusion pattern, which is more robust and avoids complex boolean grouping errors.
+ *   - Directory exclusion (e.g., 'build/') now correctly creates a `-path '* /build/ *'` condition, effectively excluding that directory name and its contents at any depth (e.g., './build/' and './app/build/').
+ *   - This directly resolves the issue where `build/` in `excludePaths` was failing to exclude nested build directories.
+ *
  * - v0.2.3: (2025-05-27)
  *   - Streamlined console output: Removed AI model-specific token usage comparisons and cost estimations.
  *   - Focused output on file statistics, token counts, and structural information.
@@ -57,139 +63,144 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { exec } = require('child_process');
 
-// Define the output file name outside the config object so we can reference it
 const outputFileName = 'context.md';
 
-// CONFIGURATION - Edit these variables as needed
 const config = {
   outputFile: outputFileName,
   includePaths: [],
   excludePaths: [
-    outputFileName, 'createContext.js',
-    '.DS_Store', 'node_modules', '.git', '.hg', '.svn', 'dist', 'build', 'vendor',
-    '.gitignore', '.env', '*.log', '*.lock',
-    '.idea', '.gradle', 'local.properties', '*.apk', '*.aab', '*.iml', 'build/', 'captures/',
+    outputFileName, 'createContext.js', '.DS_Store', 'node_modules', 'vendor',
+    '*.apk', '*.aab', '*.iml', '.env', '*.log', '*.lock', '.gitignore',
+    'captures/', 'proguard-rules.pro', 'LICENSE', 'CODE_OF_CONDUCT.md', 'CONTRIBUTING.md', 'PLUGINS.md',
+    // Key directories to exclude, now handled correctly
+    '.github/', 'dist/', 'build/', '.gradle/',
+    // Android-specific files
+    'gradle.properties', 'gradlew', 'gradlew.bat', 'local.properties', 'settings.gradle',
   ],
   includeExtensions: [
     '.js', '.jsx', '.ts', '.tsx', '.php', '.html', '.css', '.scss',
     '.json', '.md', '.txt', '.yml', '.yaml', '.config', '.py',
     '.java', '.kt', '.kts', '.xml', '.gradle', '.pro',
-    '.c', '.cpp', '.h', '.hpp',
-    '',
+    '.c', '.cpp', '.h', '.hpp'
   ],
   maxFileSizeKB: 500,
-  debug: false
+  debug: false // Set to true to see the generated `find` command
 };
 
-// (generateDirectoryTree function remains the same as in the previous version)
-function generateDirectoryTree() {
-  try {
-    const excludeFindArgs = config.excludePaths.map(p => {
-        let condition;
-        if (p.startsWith('*.')) { // Glob patterns like *.log, *.apk
-            condition = `-name "${p}"`;
-        } else {
-            const literalPattern = p.replace(/([*?\[\]\\])/g, '\\$1');
-            if (p.includes('/') || p.endsWith('/')) {
-                let cleanedPath = literalPattern;
-                if (cleanedPath.endsWith('/')) {
-                    cleanedPath = cleanedPath.slice(0, -1);
+async function generateDirectoryTreeAsync() {
+    // This new approach builds a more robust `find` command by chaining `-not`
+    // conditions instead of grouping them all under a single `-not (...)`.
+    // This avoids complex boolean logic and is easier to debug and verify.
+
+    let findCommandParts = [
+        "find .",
+        // First, efficiently prune all hidden directories (like .git, .vscode) and their contents.
+        "\\( -path '*/.*' -prune \\)",
+        "-o",
+        // The main expression for finding files starts here.
+        "\\( -type f" // We only want files.
+    ];
+
+    // --- Exclusion Logic ---
+    // Add a `-not` condition for each exclusion pattern. This is the core of the fix.
+    if (config.excludePaths.length > 0) {
+        config.excludePaths.forEach(p => {
+            // Basic escape for single quotes in patterns, though unlikely.
+            const pattern = p.replace(/'/g, "'\\''");
+
+            let condition;
+            if (pattern.endsWith('/')) {
+                // For 'build/', creates `-path '*/build/*'`. Excludes dir and its contents anywhere.
+                const dirName = pattern.slice(0, -1);
+                condition = `-path '*/${dirName}/*'`;
+            } else if (pattern.startsWith('*.')) {
+                // For '*.apk'`, creates `-name '*.apk'`.
+                condition = `-name '${pattern}'`;
+            } else if (!pattern.includes('/') && !pattern.includes('.')) {
+                // For 'node_modules', creates `-not \( -name 'node_modules' -o -path '*/node_modules/*' \)`
+                // This excludes the directory itself or any file within it.
+                condition = `\\( -name '${pattern}' -o -path '*/${pattern}/*' \\)`;
+            } else {
+                // For specific files like 'createContext.js' or 'path/to/file.js'.
+                if (pattern.includes('/')) {
+                    condition = `-path './${pattern}'`; // Match exact path
+                } else {
+                    condition = `-name '${pattern}'`; // Match file name anywhere
                 }
-                cleanedPath = cleanedPath.startsWith('./') ? cleanedPath : `./${cleanedPath}`;
-                condition = `-path "${cleanedPath}" -o -path "${cleanedPath}/*"`;
-            } else {
-                condition = `-name "${literalPattern}" -o -path "./${literalPattern}/*"`;
             }
-        }
-        return `\\( ${condition} \\)`;
-    }).filter(Boolean);
-
-    // Prioritize pruning .git directly
-    let findCommand = `find . -type d -name .git -prune -o -type f`;
-
-    if (excludeFindArgs.length > 0) {
-      const relevantExcludeArgs = excludeFindArgs.filter(arg => !arg.includes("-name \".git\"") && !arg.includes("-path \"./.git/*\""));
-      if (relevantExcludeArgs.length > 0) {
-        findCommand += ` -not \\( ${relevantExcludeArgs.join(' -o ')} \\)`;
-      }
+            findCommandParts.push(`-not ${condition}`);
+        });
     }
 
+    // --- Inclusion Logic ---
+    // If includePaths is specified, we add a block that matches ANY of them.
     if (config.includePaths.length > 0) {
-        const includeArgs = config.includePaths.map(dirOrFile => {
-            const literalDirOrFile = dirOrFile.replace(/([*?\[\]\\])/g, '\\$1');
-            const cleanedPath = literalDirOrFile.startsWith('./') ? literalDirOrFile : `./${literalDirOrFile}`;
-            if (fs.existsSync(cleanedPath) && fs.statSync(cleanedPath).isFile()) {
-                return `-path "${cleanedPath}"`;
-            } else {
-                return `\\( -path "${cleanedPath}" -o -path "${cleanedPath}/*" \\)`;
-            }
+        const includeArgs = config.includePaths.map(p => {
+            const pattern = p.replace(/'/g, "'\\''");
+            const cleanedPath = pattern.startsWith('./') ? pattern : `./${pattern}`;
+            // Match the path itself or anything inside it if it's a directory.
+            return `\\( -path '${cleanedPath}' -o -path '${cleanedPath}/*' \\)`;
         }).join(' -o ');
-        findCommand += ` \\( ${includeArgs} \\)`;
+
+        // Add the inclusion block with `-a` (AND)
+        findCommandParts.push(`-a \\( ${includeArgs} \\)`);
     }
 
-    findCommand += ` | sort`;
+    // Finish the command
+    findCommandParts.push("-print \\)"); // End the main expression and print results
+    findCommandParts.push("| sort");
+    const findCommand = findCommandParts.join(' ');
 
     if (config.debug) {
         console.log("DEBUG: Running find command:");
         console.log(findCommand);
     }
 
-    const output = execSync(findCommand, { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });
-    return output.split('\n').filter(line => line.trim() !== '');
-
-  } catch (error) {
-    let findCmdForError = error.cmd || ''; // Use error.cmd if available
-    if (!findCmdForError && typeof findCommand === 'string') { findCmdForError = findCommand; } // Fallback to constructed command
-
-    console.error(`\n❌ Error generating directory tree with find command.`);
-    if (config.debug && findCmdForError) { console.error(`Command attempted: ${findCmdForError}`); }
-    if (error.stderr) { console.error('Stderr:', error.stderr); }
-    console.error('Error:', error.message);
-    return [];
-  }
+    return new Promise((resolve) => {
+        exec(findCommand, { maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+            if (config.debug && stderr && stderr.trim().length > 0) {
+                console.warn("DEBUG: `find` command emitted to STDERR (these are often permission errors and can sometimes be ignored):");
+                console.warn("<<<<<<<<<< FIND STDERR START >>>>>>>>>>");
+                console.warn(stderr.trim());
+                console.warn("<<<<<<<<<< FIND STDERR END >>>>>>>>>>");
+            }
+            if (error) {
+                console.error(`\n❌ Error executing find command (exit code ${error.code}). This may happen if no files match.`);
+                if (stdout && stdout.trim().length > 0 && config.debug) {
+                    console.log("DEBUG: Partial STDOUT from failed find command:", stdout.trim());
+                }
+                // Resolve with what we got, even if it's an empty list.
+                resolve(stdout ? stdout.split('\n').filter(line => line.trim() !== '') : []);
+                return;
+            }
+            const files = stdout.split('\n').filter(line => line.trim() !== '');
+            resolve(files);
+        });
+    });
 }
 
-// (shouldIncludeBasedOnExtension function remains the same)
+
 function shouldIncludeBasedOnExtension(filePath) {
   if (config.includeExtensions.length === 0) return true;
   const ext = path.extname(filePath).toLowerCase();
-  if (ext === '' && config.includeExtensions.includes('')) {
-    return true;
-  }
   return config.includeExtensions.includes(ext);
 }
 
-// (getFileSizeInKB function remains the same)
 function getFileSizeInKB(filePath) {
   try {
     const stats = fs.statSync(filePath);
-    return stats.size / 1024;
+    return stats.isFile() ? stats.size / 1024 : 0;
   } catch (error) {
     return 0;
   }
 }
 
-// (estimateTokenCount function remains the same)
-function estimateTokenCount(text, fileExt = '') {
-  const TOKENS_PER_CHAR = {
-    '.js': 0.25, '.jsx': 0.25, '.ts': 0.25, '.tsx': 0.25, '.php': 0.25,
-    '.html': 0.25, '.css': 0.22, '.scss': 0.22, '.json': 0.3, '.md': 0.18,
-    '.txt': 0.18, '.yml': 0.25, '.yaml': 0.25, '.py': 0.25, '.env': 0.25,
-    '.java': 0.25, '.kt': 0.26, '.kts': 0.26, '.xml': 0.28,
-    '.gradle': 0.25, '.pro': 0.22, '.c': 0.25, '.cpp': 0.25, '.h': 0.25,
-    'default': 0.25,
-    '': 0.20
-  };
-  let tokensPerChar = TOKENS_PER_CHAR.default;
-  if (TOKENS_PER_CHAR[fileExt] !== undefined) {
-    tokensPerChar = TOKENS_PER_CHAR[fileExt];
-  }
-  return Math.ceil(text.length * tokensPerChar);
+function estimateTokenCount(text) {
+    return Math.ceil(text.length * 0.25);
 }
 
-// (getLanguageFromExt function remains the same)
 function getLanguageFromExt(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   const filename = path.basename(filePath).toLowerCase();
@@ -203,132 +214,95 @@ function getLanguageFromExt(filePath) {
     '.js': 'javascript', '.jsx': 'jsx', '.ts': 'typescript', '.tsx': 'tsx',
     '.php': 'php', '.html': 'html', '.css': 'css', '.scss': 'scss',
     '.json': 'json', '.md': 'markdown', '.txt': 'text', '.yml': 'yaml',
-    '.yaml': 'yaml', '.sh': 'bash', '.bash': 'bash', '.py': 'python',
-    '.java': 'java', '.c': 'c', '.cpp': 'cpp', '.cs': 'csharp', '.rb': 'ruby',
-    '.go': 'go', '.rs': 'rust', '.swift': 'swift', '.kt': 'kotlin', '.kts': 'kotlin',
-    '.dart': 'dart', '.sql': 'sql', '.env': 'dotenv', '.config': 'plaintext',
-    '.xml': 'xml', '.gradle': 'groovy',
-    '.h': 'c', '.hpp': 'cpp',
+    '.yaml': 'yaml', '.sh': 'bash', '.py': 'python', '.java': 'java',
+    '.c': 'c', '.cpp': 'cpp', '.h': 'c', '.hpp': 'cpp', '.cs': 'csharp',
+    '.rb': 'ruby', '.go': 'go', '.rs': 'rust', '.swift': 'swift',
+    '.kt': 'kotlin', '.kts': 'kotlin', '.dart': 'dart', '.sql': 'sql',
+    '.env': 'dotenv', '.config': 'plaintext', '.xml': 'xml', '.gradle': 'groovy',
   };
   return langMap[ext] || 'plaintext';
 }
 
-// (generateTreeStructure function remains the same)
 function generateTreeStructure(files) {
-  const cleanPaths = files.map(file => file.startsWith('./') ? file.substring(2) : file);
-  const tree = {};
-  for (const file of cleanPaths) {
-    const parts = file.split('/');
-    let current = tree;
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
-      const isFile = i === parts.length - 1;
-      if (isFile) {
-        if (!current.files) current.files = [];
-        current.files.push(part);
-      } else {
-        if (!current.dirs) current.dirs = {};
-        if (!current.dirs[part]) current.dirs[part] = {};
-        current = current.dirs[part];
-      }
-    }
-  }
-  function printTree(node, prefix = '', isLast = true) {
-    let result = '';
-    if (node.dirs) {
-      const dirs = Object.keys(node.dirs).sort();
-      dirs.forEach((dir, index) => {
-        const isLastDir = index === dirs.length - 1 && (!node.files || node.files.length === 0);
-        result += `${prefix}${isLastDir ? '└── ' : '├── '}📁 ${dir}/\n`;
-        result += printTree(node.dirs[dir], `${prefix}${isLastDir ? '    ' : '│   '}`, isLastDir);
-      });
-    }
-    if (node.files) {
-      node.files.sort();
-      node.files.forEach((file, index) => {
-        const isLastFile = index === node.files.length - 1;
-        result += `${prefix}${isLastFile ? '└── ' : '├── '}📄 ${file}\n`;
-      });
-    }
-    return result;
-  }
-  return printTree(tree);
+    if (!files || files.length === 0) return "[No files to display]";
+    const tree = {};
+    files.forEach(file => {
+        const parts = file.startsWith('./') ? file.substring(2).split('/') : file.split('/');
+        let current = tree;
+        parts.forEach((part, i) => {
+            const isFile = i === parts.length - 1;
+            if (isFile) {
+                current.files = current.files || [];
+                current.files.push(part);
+            } else {
+                current.dirs = current.dirs || {};
+                current[part] = current[part] || {};
+                current = current[part];
+            }
+        });
+    });
+
+    const buildTree = (node, prefix = '') => {
+        let result = '';
+        const dirs = Object.keys(node).filter(k => k !== 'files').sort();
+        const files = (node.files || []).sort();
+        dirs.forEach((dir, i) => {
+            const isLast = i === dirs.length - 1 && files.length === 0;
+            result += `${prefix}${isLast ? '└── ' : '├── '}📁 ${dir}/\n`;
+            result += buildTree(node[dir], `${prefix}${isLast ? '    ' : '│   '}`);
+        });
+        files.forEach((file, i) => {
+            const isLast = i === files.length - 1;
+            result += `${prefix}${isLast ? '└── ' : '├── '}📄 ${file}\n`;
+        });
+        return result;
+    };
+    return buildTree(tree).replace(/\[object Object\]/g, ''); // Fix for nested structure bug
 }
 
-// (formatFileSize function remains the same)
 function formatFileSize(sizeInKB) {
   if (sizeInKB < 0.01 && sizeInKB > 0) return "< 0.01 KB";
   if (sizeInKB === 0) return "0 KB";
-  if (sizeInKB < 1024) {
-    return `${sizeInKB.toFixed(2)} KB`;
-  } else {
-    return `${(sizeInKB / 1024).toFixed(2)} MB`;
-  }
+  return sizeInKB < 1024 ? `${sizeInKB.toFixed(2)} KB` : `${(sizeInKB / 1024).toFixed(2)} MB`;
 }
 
-// (formatNumber function remains the same)
 function formatNumber(num) {
   return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
-
-// *** MODIFIED FUNCTION (Output Section) ***
-function generateContextFile() {
+async function generateContextFile() {
   console.log("🔍 Finding relevant files...");
-  const initialFiles = generateDirectoryTree();
+  const initialFiles = await generateDirectoryTreeAsync();
 
-  if (initialFiles.length === 0 && !config.debug) {
-      console.log("\n⚠️ No files found by the 'find' command. Check path configurations or run with debug:true.");
+  if (initialFiles.length === 0) {
+      console.log("\n⚠️ No files found that match your criteria.");
+      console.log("   Check `includePaths`, `excludePaths`, and `includeExtensions` in your config.");
+      console.log("   Or, run with `debug: true` to see the exact `find` command used.");
       return;
   }
 
-  console.log(`   Found ${initialFiles.length} files initially. Filtering by extension...`);
-  const filesToProcess = initialFiles.filter(filePath => shouldIncludeBasedOnExtension(filePath));
+  console.log(`   Found ${initialFiles.length} potential files. Filtering by extension...`);
+
+  const filesToProcess = initialFiles.filter(shouldIncludeBasedOnExtension);
 
   if (filesToProcess.length === 0) {
-      console.log("\n⚠️ No files found matching the path *and* extension criteria. Check your excludePaths, includePaths, and includeExtensions in the config.");
-      if (config.debug) console.log(`   Initial files from find: ${initialFiles.join(', ')}`)
+      console.log(`\n⚠️ No files remaining after filtering by 'includeExtensions'.`);
+      console.log(`   Initial find found ${initialFiles.length} files, but none had the required extensions.`);
       return;
   }
-  console.log(`   ${filesToProcess.length} files match extension criteria. Processing...`);
+  console.log(`   Processing ${filesToProcess.length} files...`);
 
-  const stats = {
-    totalFilesFoundInitial: initialFiles.length,
-    totalFilesProcessed: filesToProcess.length,
-    includedFileContents: 0,
-    skippedFileContents: 0,
-    skippedDueToSize: 0,
-    totalTokens: 0,
-    totalCharacters: 0,
-    totalOriginalSizeKB: 0,
-    filesByType: {},
-    tokensPerFileType: {}
-  };
-
+  const stats = { totalFilesFound: initialFiles.length, totalFilesProcessed: filesToProcess.length, includedFileContents: 0, skippedDueToSize: 0, skippedOther: 0, totalTokens: 0, totalOriginalSizeKB: 0 };
   const projectName = path.basename(process.cwd());
   let outputContent = `# Project Context: ${projectName}\n\nGenerated: ${new Date().toISOString()}\n\n`;
-
-  console.log("🌳 Generating directory structure...");
-  outputContent += `## Directory Structure\n\n\`\`\`\n`;
-  outputContent += generateTreeStructure(filesToProcess);
-  outputContent += `\`\`\`\n\n`;
-
-  console.log("📄 Processing file contents...");
+  outputContent += `## Directory Structure\n\n\`\`\`\n${generateTreeStructure(filesToProcess)}\`\`\`\n\n`;
   outputContent += `## File Contents\n\n`;
 
   for (const filePath of filesToProcess) {
-    const fileExt = path.extname(filePath).toLowerCase();
-
     const currentFileSizeKB = getFileSizeInKB(filePath);
     stats.totalOriginalSizeKB += currentFileSizeKB;
-    if (!stats.filesByType[fileExt]) {
-      stats.filesByType[fileExt] = 0;
-      stats.tokensPerFileType[fileExt] = 0;
-    }
-    stats.filesByType[fileExt]++;
 
     if (currentFileSizeKB > config.maxFileSizeKB) {
-      stats.skippedFileContents++;
       stats.skippedDueToSize++;
       outputContent += `### \`${filePath}\`\n\n*File content skipped: Size ${formatFileSize(currentFileSizeKB)} exceeds ${config.maxFileSizeKB} KB limit.*\n\n`;
       continue;
@@ -337,70 +311,37 @@ function generateContextFile() {
     try {
       const fileContent = fs.readFileSync(filePath, 'utf8');
       const language = getLanguageFromExt(filePath);
-
       stats.includedFileContents++;
-      const fileTokens = estimateTokenCount(fileContent, fileExt);
-      stats.totalTokens += fileTokens;
-      stats.totalCharacters += fileContent.length;
-      stats.tokensPerFileType[fileExt] += fileTokens;
-
-      outputContent += `### \`${filePath}\`\n\n`;
-      outputContent += `\`\`\`${language}\n`;
-      outputContent += fileContent.trim() ? fileContent : '[EMPTY FILE]';
-      outputContent += `\n\`\`\`\n\n`;
+      stats.totalTokens += estimateTokenCount(fileContent);
+      outputContent += `### \`${filePath}\`\n\n\`\`\`${language}\n${fileContent.trim() ? fileContent : '[EMPTY FILE]'}\n\`\`\`\n\n`;
     } catch (error) {
-      stats.skippedFileContents++;
+      stats.skippedOther++;
       outputContent += `### \`${filePath}\`\n\n*Error reading file: ${error.message}*\n\n`;
-      console.warn(`Warning: Could not read file ${filePath}: ${error.message}`);
+      console.warn(`Warning on ${filePath}: ${error.message}`);
     }
   }
 
-  const structureMarkdown = outputContent.replace(/```[^`]*?\n[\s\S]*?\n```/g, '');
-  const structureTokens = estimateTokenCount(structureMarkdown, '.md');
+  const structureTokens = estimateTokenCount(outputContent.replace(/```[^`]*?\n[\s\S]*?\n```/g, ''));
   stats.totalTokens += structureTokens;
 
   fs.writeFileSync(config.outputFile, outputContent);
-  console.log(`💾 Writing output to ${config.outputFile}...`);
-
+  console.log(`\n💾 Writing output to ${config.outputFile}...`);
   const outputFileSizeKB = getFileSizeInKB(config.outputFile);
 
   console.log("\n" + "=".repeat(60));
-  console.log(`📊 CONTEXT FILE STATISTICS`);
+  console.log("📊 CONTEXT FILE STATISTICS");
   console.log("=".repeat(60));
-  console.log(`📝 Content Summary:`);
-  console.log(`  • Context file created: ${config.outputFile}`);
-  console.log(`  • File size: ${formatFileSize(outputFileSizeKB)}`);
+  console.log(`  • Context file created: ${config.outputFile} (${formatFileSize(outputFileSizeKB)})`);
   console.log(`  • Estimated total tokens: ~${formatNumber(stats.totalTokens)}`);
-  console.log(`  • Characters (content only): ${formatNumber(stats.totalCharacters)}`);
-  console.log(`  • Markdown overhead (est.): ~${formatNumber(structureTokens)} tokens`);
-
-  console.log(`\n📁 File Processing:`);
-  console.log(`  • Files found by path search: ${stats.totalFilesFoundInitial}`);
-  console.log(`  • Files matching extensions: ${stats.totalFilesProcessed}`);
-  console.log(`  • File content included: ${stats.includedFileContents}`);
-  console.log(`  • File content skipped (size limit): ${stats.skippedDueToSize}`);
-  console.log(`  • Total original size of processed files: ${formatFileSize(stats.totalOriginalSizeKB)}`);
-
-  console.log(`\n📊 File Types Distribution (Processed Files with Content Included):`);
-  const sortedFileTypes = Object.entries(stats.tokensPerFileType)
-    .filter(([, tokens]) => tokens > 0)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10);
-
-  sortedFileTypes.forEach(([ext, tokens]) => {
-    const count = stats.filesByType[ext] || 0;
-    console.log(`  • ${ext || '(no ext)'}: ~${formatNumber(tokens)} tokens (${count} files processed)`);
-  });
-  if (Object.keys(stats.tokensPerFileType).length > sortedFileTypes.length) {
-      console.log(`  • ... and more`);
-  }
-
+  console.log(`\n  • Files found by search: ${stats.totalFilesFound}`);
+  console.log(`  • Files processed (after ext filter): ${stats.totalFilesProcessed}`);
+  console.log(`  • Content included: ${stats.includedFileContents} files`);
+  console.log(`  • Skipped (size > ${config.maxFileSizeKB}KB): ${stats.skippedDueToSize} files`);
+  console.log(`  • Skipped (read errors): ${stats.skippedOther} files`);
   console.log("=".repeat(60));
-  console.log(`✨ Done! Copy the contents of ${config.outputFile} into your AI chat.`);
-  console.log("Be mindful of the total token count when providing this to an AI assistant.");
-  console.log("For very large projects, consider further refining includes/excludes or splitting context.");
-  console.log("=".repeat(60) + "\n");
+  console.log("✨ Done!");
 }
 
-// Execute the main function
-generateContextFile();
+generateContextFile().catch(err => {
+    console.error("\n❌ An unexpected error occurred:", err);
+});
